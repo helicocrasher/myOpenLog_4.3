@@ -63,12 +63,51 @@
 */
 
 #define __PROG_TYPES_COMPAT__ //Needed to get SerialPort.h to work in Arduino 1.6.x
-
+#include <Arduino.h>
 #include <SPI.h>
 #include <SdFat.h> //We do not use the built-in SD.h file because it calls Serial.print
 #include <SerialPort.h> //This is a new/beta library written by Bill Greiman. You rock Bill! https://github.com/greiman/SerialPort
 #include <EEPROM.h>
 #include <FreeStack.h> //Allows us to print the available stack/RAM size
+
+void blinkError(byte ERROR_TYPE);
+void checkEmergencyReset(void); 
+void setDefaultSettings(void);
+void readSystemSettings(void);
+char* newLog(void);
+void seqLog(void);
+byte appendFile(char* fileName);
+void toggleLED(byte pinNumber);
+void readConfigFile(void);
+void recordConfigFile(void);
+void writeBaud(long baud);
+long readBaud(void);
+void recordConfigFile(void); 
+void commandShell(void);
+uint32_t strToLong(const char* str);
+byte readLine(char* buffer, byte bufferSize);
+void printMenu(void);
+void getCommandArgs(char* commandLine);
+void baudMenu(void);
+void systemMenu(void);
+char* getCmdArg(char* commandLine, byte argNumber);
+char* getCmdArg(byte index);
+byte countCmdArgs(char* commandLine);
+byte countCmdArgs(void);
+//byte isNumber(char* str);
+char* isNumber(char* buffer, byte bufferLength);
+byte wildcmp(const char* wild, const char* string);
+uint16_t writeLogBufferWithTimestamp(SdFile* file, const byte* buffer, byte length, unsigned long chunkReadMicros);
+
+int getSerialByte(); //This is a new function that is like Serial.read() but it also toggles the LEDs and checks for escape characters. It is used in command shell mode.
+
+void lsPrint(char* fileName); //This is a new function that is like SdFile::lsPrint() but it also toggles the LEDs and checks for escape characters. It is used in command shell mode.
+void lsPrint(FatFile * theDir, char * cmdStr, byte flags, byte indent); //This is a new function that is like SdFile::lsPrint() but it also toggles the LEDs and checks for escape characters. It is used in command shell mode.
+int getSerialByteWithTimeout(unsigned long timeout_msec); //This is a new function that is like Serial.read() but it also toggles the LEDs and checks for escape characters. It is used in command shell mode. It waits for a byte to be available until the timeout, and returns -1 if no byte received in that time.
+void splitCmdLine(char* commandLine, char* command, char* arg1, char* arg2, char* arg3, char* arg4, char* arg5); //This is a new function that splits a command line into its command and arguments. It is used in command shell mode.
+byte lsPrintNext(FatFile * theDir, char * cmdStr, byte flags, byte indent);
+byte lsPrintNext(void); //This is a new function that is like SdFile::lsPrintNext() but it also toggles the LEDs and checks for escape characters. It is used in command shell mode.
+byte splitCmdLineArgs(char* buffer, byte bufferLength); //This is a new function that splits a command line into its command and arguments. It is used in command shell mode. It returns the number of arguments found.
 
 SerialPort<0, 512, 0> NewSerial;
 //<port #, RX buffer size, TX buffer size>
@@ -98,7 +137,7 @@ void(* Reset_AVR) (void) = 0; //Way of resetting the ATmega
 
 #define CFG_FILENAME "config.txt\0" //This is the name of the file that contains the unit settings
 
-#define MAX_CFG "115200,255,255,1,1,1,1,255,255\0" // This is used to calculate the longest possible configuration string. These actual values are not used
+#define MAX_CFG "115200,255,255,1,1,1,1,255,255,1\0" // This is used to calculate the longest possible configuration string. These actual values are not used
 #define CFG_LENGTH (strlen(MAX_CFG) + 1) //Length of text found in config file. strlen ignores \0 so we have to add it back 
 #define SEQ_FILENAME "SEQLOG00.TXT\0" //This is the name for the file when you're in sequential mode
 
@@ -116,6 +155,7 @@ void(* Reset_AVR) (void) = 0; //Way of resetting the ATmega
 #define LOCATION_IGNORE_RX		      0x0C
 #define LOCATION_MAX_FILESIZE_MB    0x0D    // In MODE_ROTATE, this is the maximum size (in MB) that a file is allowed to grow to before starting a new file
 #define LOCATION_MAX_FILENUMBER     0x0E    // In MODE_ROTATE, this is the highest allowed value of newFileNumer in NeLog() before wrapping around to zero
+#define LOCATION_TIMESTAMP_DOLLAR   0x0F    // If ON, insert ,NNNN immediately before each '$' in logged data
 
 #define BAUD_MIN  300
 #define BAUD_MAX  1000000
@@ -164,6 +204,7 @@ byte setting_echo; //This turns on/off echoing at the command prompt
 byte setting_ignore_RX; //This flag, when set to 1 will make OpenLog ignore the state of the RX pin when powering up
 byte setting_max_filesize_MB; // In MODE_ROTATE, the maximum number of MB that a file is allowed to grow to
 byte setting_max_filenumber;  // In MODE_ROTATE, the maximum file number before wrapping around to 0
+byte setting_timestamp_dollar; // If ON, prepend NNNN, timestamp before each '$' in logged data
 
 //The number of command line arguments
 //Increase to support more arguments but be aware of the memory restrictions
@@ -506,7 +547,8 @@ byte appendFile(char* fileName)
       byte charsToRecord = NewSerial.read(localBuffer, sizeof(localBuffer)); //Read characters from global buffer into the local buffer
       if (charsToRecord > 0)
       {
-        workingFile.write(localBuffer, charsToRecord); //Record the buffer to the card
+        unsigned long chunkReadMicros = micros();
+        uint16_t bytesLogged = writeLogBufferWithTimestamp(&workingFile, localBuffer, charsToRecord, chunkReadMicros); //Record the buffer to the card
 
         toggleLED(stat1); //Toggle the STAT1 LED each time we record the buffer
 
@@ -514,7 +556,7 @@ byte appendFile(char* fileName)
         // When it gets more than setting_max_filesize_MB, we exit (so as to close this file and start another)
         if (setting_systemMode == MODE_ROTATE)
         {
-          totalBytesWritten += charsToRecord; // Add these new bytes to our running total
+          totalBytesWritten += bytesLogged; // Add these new bytes to our running total
           if (totalBytesWritten >= maxFilesizeBytes)
           {
             workingFile.sync();
@@ -531,6 +573,13 @@ byte appendFile(char* fileName)
       else if ( (millis() - lastSyncTime) > MAX_IDLE_TIME_MSEC) //If we haven't received any characters in 2s, goto sleep
       {
         workingFile.sync(); //Sync the card before we go to sleep
+        lastSyncTime = millis(); //Reset the last sync time to now
+
+        if (setting_timestamp_dollar == ON)
+        {
+          // Keep Timer0 running so millis()/micros() track real time while idle.
+          continue;
+        }
 
         digitalWrite(stat1, LOW); //Turn off stat LED to save power
 
@@ -551,7 +600,6 @@ byte appendFile(char* fileName)
         power_timer0_enable();
 
         escapeCharsReceived = 0; // Clear the esc flag as it has timed out
-        lastSyncTime = millis(); //Reset the last sync time to now
       }
     }
   }
@@ -564,6 +612,7 @@ byte appendFile(char* fileName)
     byte charsToRecord = NewSerial.read(localBuffer, sizeof(localBuffer)); //Read characters from global buffer into the local buffer
     if (charsToRecord > 0) //If we have characters, check for escape characters
     {
+      unsigned long chunkReadMicros = micros();
       if (localBuffer[0] == setting_escape_character)
       {
         escapeCharsReceived++;
@@ -584,7 +633,7 @@ byte appendFile(char* fileName)
       else
         escapeCharsReceived = 0;
 
-      workingFile.write(localBuffer, charsToRecord); //Record the buffer to the card
+      uint16_t bytesLogged = writeLogBufferWithTimestamp(&workingFile, localBuffer, charsToRecord, chunkReadMicros); //Record the buffer to the card
 
       toggleLED(stat1); //Toggle the STAT1 LED each time we record the buffer
 
@@ -592,7 +641,7 @@ byte appendFile(char* fileName)
       // When it gets more than setting_max_filesize_MB, we exit (so as to close this file and start another)
       if (setting_systemMode == MODE_ROTATE)
       {
-        totalBytesWritten += charsToRecord; // Add these new bytes to our running total
+        totalBytesWritten += bytesLogged; // Add these new bytes to our running total
         if (totalBytesWritten >= maxFilesizeBytes)
         {
           workingFile.sync();
@@ -609,6 +658,14 @@ byte appendFile(char* fileName)
     else if ( (millis() - lastSyncTime) > MAX_IDLE_TIME_MSEC) //If we haven't received any characters in 2s, goto sleep
     {
       workingFile.sync(); //Sync the card before we go to sleep
+      lastSyncTime = millis(); //Reset the last sync time to now
+
+      if (setting_timestamp_dollar == ON)
+      {
+        // Keep Timer0 running so millis()/micros() track real time while idle.
+        escapeCharsReceived = 0;
+        continue;
+      }
 
       digitalWrite(stat1, LOW); //Turn off stat LED to save power
 
@@ -629,7 +686,6 @@ byte appendFile(char* fileName)
       power_timer0_enable();
 
       escapeCharsReceived = 0; // Clear the esc flag as it has timed out
-      lastSyncTime = millis(); //Reset the last sync time to now
     }
   }
 
@@ -646,6 +702,64 @@ byte appendFile(char* fileName)
   NewSerial.print(F("~")); // Indicate a successful record
 
   return (1); // Exit to command mode now since excape sequence seen
+}
+
+uint16_t writeLogBufferWithTimestamp(SdFile* file, const byte* buffer, byte length, unsigned long chunkReadMicros)
+{
+  if (setting_timestamp_dollar == OFF)
+  {
+    file->write(buffer, length);
+    return length;
+  }
+
+  uint16_t totalWritten = 0;
+  byte chunkStart = 0;
+  uint32_t charTimeUs = 0;
+
+  if (setting_uart_speed > 0)
+    charTimeUs = (uint32_t)(10000000UL / (uint32_t)setting_uart_speed); // 10 bits per serial character
+
+  if (charTimeUs == 0)
+    charTimeUs = 1;
+
+  for (byte i = 0; i < length; i++)
+  {
+    if (buffer[i] == '$')
+    {
+      byte chunkLength = i - chunkStart;
+      if (chunkLength > 0)
+      {
+        file->write(buffer + chunkStart, chunkLength);
+        totalWritten += chunkLength;
+      }
+
+      uint32_t ageUs = (uint32_t)(length - 1 - i) * charTimeUs;
+      uint32_t eventUs = chunkReadMicros - ageUs;
+      uint16_t ms = (uint16_t)((eventUs / 1000UL) % 10000UL);
+      char stamp[5];
+      stamp[0] = '0' + ((ms / 1000) % 10);
+      stamp[1] = '0' + ((ms / 100) % 10);
+      stamp[2] = '0' + ((ms / 10) % 10);
+      stamp[3] = '0' + (ms % 10);
+      stamp[4] = ',';
+      file->write(stamp, sizeof(stamp));
+      totalWritten += sizeof(stamp);
+
+      file->write(buffer + i, 1);
+      totalWritten += 1;
+
+      chunkStart = i + 1;
+    }
+  }
+
+  if (chunkStart < length)
+  {
+    byte trailingLength = length - chunkStart;
+    file->write(buffer + chunkStart, trailingLength);
+    totalWritten += trailingLength;
+  }
+
+  return totalWritten;
 }
 
 //The following are system functions needed for basic operation
@@ -751,6 +865,9 @@ void setDefaultSettings(void)
   // Set the maximum number of files in rotate mode to 60
   EEPROM.write(LOCATION_MAX_FILENUMBER, 60);
 
+  // Disable timestamp insertion before '$' by default.
+  EEPROM.write(LOCATION_TIMESTAMP_DOLLAR, OFF);
+
   //These settings are not recorded to the config file
   //We can't do it here because we are not sure the FAT system is init'd
 }
@@ -839,6 +956,14 @@ void readSystemSettings(void)
   // Readin the max filesize and max filenumber values used in MODE_ROTATE
   setting_max_filesize_MB = EEPROM.read(LOCATION_MAX_FILESIZE_MB);
   setting_max_filenumber = EEPROM.read(LOCATION_MAX_FILENUMBER);
+
+  // Read whether we should insert ,NNNN timestamp before each '$'.
+  setting_timestamp_dollar = EEPROM.read(LOCATION_TIMESTAMP_DOLLAR);
+  if (setting_timestamp_dollar > 1)
+  {
+    setting_timestamp_dollar = OFF;
+    EEPROM.write(LOCATION_TIMESTAMP_DOLLAR, setting_timestamp_dollar);
+  }
 }
 
 void readConfigFile(void)
@@ -901,6 +1026,7 @@ void readConfigFile(void)
   byte new_system_ignore_RX = OFF;
   byte new_setting_max_filesize_MB = 100;
   byte new_setting_max_filenumber = 100;
+  byte new_setting_timestamp_dollar = OFF;
 
   //Parse the settings out
   byte i = 0, j = 0, settingNumber = 0;
@@ -973,6 +1099,15 @@ void readConfigFile(void)
       NewSerial.println(new_setting_max_filenumber);
 #endif
     }
+        else if (settingNumber == 9) // Insert timestamp before '$'
+        {
+      new_setting_timestamp_dollar = newSettingInt;
+      if (new_setting_timestamp_dollar != ON && new_setting_timestamp_dollar != OFF) new_setting_timestamp_dollar = OFF;
+    #if DEBUG
+      NewSerial.print(F("Timestamp before '$': "));
+      NewSerial.println(new_setting_timestamp_dollar);
+    #endif
+        }
     else
       //We're done! Stop looking for settings
       break;
@@ -1056,6 +1191,13 @@ void readConfigFile(void)
     recordNewSettings = true;
   }
 
+  if (new_setting_timestamp_dollar != setting_timestamp_dollar) {
+    setting_timestamp_dollar = new_setting_timestamp_dollar;
+    EEPROM.write(LOCATION_TIMESTAMP_DOLLAR, setting_timestamp_dollar);
+
+    recordNewSettings = true;
+  }
+
   //We don't want to constantly record a new config file on each power on. Only record when there is a change.
   if (recordNewSettings == true) {
     recordConfigFile(); //If we corrected some values because the config file was corrupt, then overwrite any corruption
@@ -1115,11 +1257,12 @@ void recordConfigFile(void)
   byte current_system_ignore_RX = EEPROM.read(LOCATION_IGNORE_RX);
   byte current_system_max_filesize_MB = EEPROM.read(LOCATION_MAX_FILESIZE_MB);
   byte current_system_max_filenumber = EEPROM.read(LOCATION_MAX_FILENUMBER);
+  byte current_system_timestamp_dollar = EEPROM.read(LOCATION_TIMESTAMP_DOLLAR);
 
   //Convert system settings to visible ASCII characters
   sprintf_P(
     settingsString,
-    PSTR("%ld,%d,%d,%d,%d,%d,%d,%d,%d\0"),
+    PSTR("%ld,%d,%d,%d,%d,%d,%d,%d,%d,%d\0"),
     current_system_baud,
     current_system_escape,
     current_system_max_escape,
@@ -1128,7 +1271,8 @@ void recordConfigFile(void)
     current_system_echo,
     current_system_ignore_RX,
     current_system_max_filesize_MB,
-    current_system_max_filenumber
+    current_system_max_filenumber,
+    current_system_timestamp_dollar
   );
 
   //Record current system settings to the config file
@@ -1137,7 +1281,7 @@ void recordConfigFile(void)
   myFile.println(); //Add a break between lines
 
   //Add a decoder line to the file
-#define HELP_STR "baud,escape,esc#,mode,verb,echo,ignoreRX,maxFilesize,maxFilenum\0"
+#define HELP_STR "baud,escape,esc#,mode,verb,echo,ignoreRX,maxFilesize,maxFilenum,timestampBeforeDollar\0"
   char helperString[strlen(HELP_STR) + 1]; //strlen is preprocessed but returns one less because it ignores the \0
   strcpy_P(helperString, PSTR(HELP_STR));
   myFile.write(helperString); //Add this string to the file
@@ -1384,7 +1528,8 @@ void commandShell(void)
       {
         if (tempFile.isFile()) // Remove only files
         {
-          if (tempFile.getSFN(fname)) // Get the filename of the object we're looking at
+      //    if (tempFile.getFilename(fname)) // Get the filename of the object we're looking at
+          if (tempFile.getSFN(fname))    // Get the filename of the object we're looking at
           {
             if (wildcmp(commandArg, fname))  // See if it matches the wildcard
             {
@@ -2143,6 +2288,7 @@ void systemMenu(void)
       EEPROM.write(LOCATION_MAX_ESCAPE_CHAR, 0xFF);
       EEPROM.write(LOCATION_MAX_FILESIZE_MB, 0xFF);
       EEPROM.write(LOCATION_MAX_FILENUMBER, 0xFF);
+      EEPROM.write(LOCATION_TIMESTAMP_DOLLAR, 0xFF);
 
       //Remove the config file if it is there
       SdFile myFile;
@@ -2434,7 +2580,7 @@ byte lsPrintNext(FatFile * theDir, char * cmdStr, byte flags, byte indent)
   // Find next available object to display in the specified directory
   while ((open_stat = tempFile.openNext(theDir, O_READ)))
   {
-    //    if (tempFile.getFilename(fname)) // Get the filename of the object we're looking at
+//     if (tempFile.getFilename(fname)) // Get the filename of the object we're looking at
     if (tempFile.getSFN(fname)) // Get the filename of the object we're looking at
     {
       if (tempFile.isDir() || tempFile.isFile() || tempFile.isSubDir())
