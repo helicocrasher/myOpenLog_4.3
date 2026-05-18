@@ -155,7 +155,7 @@ void(* Reset_AVR) (void) = 0; //Way of resetting the ATmega
 #define LOCATION_IGNORE_RX		      0x0C
 #define LOCATION_MAX_FILESIZE_MB    0x0D    // In MODE_ROTATE, this is the maximum size (in MB) that a file is allowed to grow to before starting a new file
 #define LOCATION_MAX_FILENUMBER     0x0E    // In MODE_ROTATE, this is the highest allowed value of newFileNumer in NeLog() before wrapping around to zero
-#define LOCATION_TIMESTAMP_DOLLAR   0x0F    // If ON, insert ,NNNN immediately before each '$' in logged data
+#define LOCATION_TIMESTAMP_DOLLAR   0x0F    // If ON, insert 'NNNN,' immediately before each '$' in logged data
 
 #define BAUD_MIN  300
 #define BAUD_MAX  1000000
@@ -204,7 +204,7 @@ byte setting_echo; //This turns on/off echoing at the command prompt
 byte setting_ignore_RX; //This flag, when set to 1 will make OpenLog ignore the state of the RX pin when powering up
 byte setting_max_filesize_MB; // In MODE_ROTATE, the maximum number of MB that a file is allowed to grow to
 byte setting_max_filenumber;  // In MODE_ROTATE, the maximum file number before wrapping around to 0
-byte setting_timestamp_dollar; // If ON, prepend NNNN, timestamp before each '$' in logged data
+byte setting_timestamp_dollar; // If ON, prepend 'NNNN,' timestamp before each '$' in logged data
 
 //The number of command line arguments
 //Increase to support more arguments but be aware of the memory restrictions
@@ -957,7 +957,7 @@ void readSystemSettings(void)
   setting_max_filesize_MB = EEPROM.read(LOCATION_MAX_FILESIZE_MB);
   setting_max_filenumber = EEPROM.read(LOCATION_MAX_FILENUMBER);
 
-  // Read whether we should insert ,NNNN timestamp before each '$'.
+  // Read whether we should insert 'NNNN,' timestamp before each '$'.
   setting_timestamp_dollar = EEPROM.read(LOCATION_TIMESTAMP_DOLLAR);
   if (setting_timestamp_dollar > 1)
   {
