@@ -61,6 +61,8 @@ This project uses PlatformIO environment `openlog` configured in `platformio.ini
 
 - This fork focuses on practical NMEA timestamp insertion while preserving original OpenLog behavior as much as possible.
 - Core OpenLog architecture, command shell behavior, and SD logging flow remain based on SparkFun OpenLog 4.3.
+- The libraries from OpenLog are untouched.
+- The base is https://github.com/sparkfun/OpenLog commit (140fe56) as of Oct 14, 2021
 
 ## Fork Change Log
 
